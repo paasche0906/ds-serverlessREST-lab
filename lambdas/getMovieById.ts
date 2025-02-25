@@ -1,65 +1,73 @@
-import { Handler } from "aws-lambda";
-import { APIGatewayProxyHandlerV2 } from "aws-lambda";
+import { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 
-const ddbDocClient = createDDbDocClient();
+const client = new DynamoDBClient({});
+const docClient = DynamoDBDocumentClient.from(client);
 
-export const handler: APIGatewayProxyHandlerV2 = async (event, context) => { 
+const TABLE_NAME = process.env.TABLE_NAME || "";
+const CAST_TABLE_NAME = process.env.CAST_TABLE_NAME || "";
+
+export const handler = async (
+  event: APIGatewayProxyEvent
+): Promise<APIGatewayProxyResult> => {
   try {
-    console.log("[EVENT]", JSON.stringify(event));
-    const parameters  = event?.pathParameters;
-    const movieId = parameters?.movieId ? parseInt(parameters.movieId) : undefined;
-
+    const movieId = event.pathParameters?.movieId;
     if (!movieId) {
       return {
-        statusCode: 404,
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ Message: "Missing movie Id" }),
+        statusCode: 400,
+        body: JSON.stringify({ error: "Movie ID is required" }),
       };
     }
 
-    const commandOutput = await ddbDocClient.send(
-      new GetCommand({
-        TableName: process.env.TABLE_NAME,
-        Key: { id: movieId },
-      })
-    );
-    console.log("GetCommand response: ", commandOutput);
-    if (!commandOutput.Item) {
+    // Check if "cast=true" is provided in query parameters
+    const includeCast = event.queryStringParameters?.cast === "true";
+
+    // Fetch movie metadata from DynamoDB
+    const movieCommand = new GetCommand({
+      TableName: TABLE_NAME,
+      Key: { id: movieId },
+    });
+
+    const movieResult = await docClient.send(movieCommand);
+
+    if (!movieResult.Item) {
       return {
         statusCode: 404,
-        headers: {
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ Message: "Invalid movie Id" }),
+        body: JSON.stringify({ error: "Movie not found" }),
       };
     }
-    const body = {
-      data: commandOutput.Item,
-    };
 
-    // Return Response
+    let response = { ...movieResult.Item };
+
+    // If cast=true, fetch cast information
+    if (includeCast) {
+      const castCommand = new GetCommand({
+        TableName: CAST_TABLE_NAME, // Assuming cast information is in a different table
+        Key: { movieId: movieId },
+      });
+
+      const castResult = await docClient.send(castCommand);
+
+      if (castResult.Item) {
+        response = { ...response, cast: castResult.Item.cast };
+      } else {
+        response = { ...response, cast: [] }; // Return empty cast if not found
+      }
+    }
+
     return {
       statusCode: 200,
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(body),
+      body: JSON.stringify(response),
     };
-  } catch (error: any) {
-    console.log(JSON.stringify(error));
+  } catch (error) {
     return {
       statusCode: 500,
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({ error }),
+      body: JSON.stringify({ error: "Internal Server Error", details: error }),
     };
   }
 };
+
 
 function createDDbDocClient() {
   const ddbClient = new DynamoDBClient({ region: process.env.REGION });
